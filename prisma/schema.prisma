@@ -1,0 +1,68 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            Int      @id @default(autoincrement())
+  email         String   @unique
+  password      String
+  fullName      String?
+  phoneNumber   String?
+  reportingManager String? // Optional in case not applicable
+  state         String
+  baseLocation  String?
+  role          Role     @default(USER) // Use an ENUM for role validation
+  organization  String?   // Organization should be required for users
+
+  // Admin-specific fields (required if role is ADMIN)
+  designation   String?  
+  companyName   String?
+  companyPhone  String?  
+  companyAddress String?
+  country       String?
+  city          String?
+  zipCode       String?
+  industry      String?
+
+  isVerified    Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  attendances   Attendance[]
+}
+
+model Attendance {
+  id            Int      @id @default(autoincrement())
+  image         String
+  lat           Float
+  lng           Float
+  locationName  String
+  purpose       String
+  subPurpose    String?
+  feedback      String?  @db.VarChar(50)
+  timestamp     DateTime @default(now())
+  date          String
+  userId        Int
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// Define role ENUM to ensure only "USER" or "ADMIN" is stored
+enum Role {
+  USER
+  ADMIN
+}
+
