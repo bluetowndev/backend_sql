@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { createUser, getAttendanceRecords, getProfile, loginUser, saveAttendance, verifyEmail } from "../controller/userController.js";
+import { createUser, distanceTravelled, getAttendanceRecords, getProfile, loginUser, mapRecord, saveAttendance, verifyEmail } from "../controller/userController.js";
+import { authenticate } from "../middleware/auth.js";
 
 const router= Router();
 
@@ -9,5 +10,7 @@ router.get("/verifyEmail", verifyEmail)
 router.get("/me", getProfile )
 router.post("/attendance", saveAttendance)
 router.get("/viewAttendance", getAttendanceRecords)
+router.post("/calculateDistance", distanceTravelled)
+router.get("/mapAttendance/:date", authenticate, mapRecord)
 
 export default router;

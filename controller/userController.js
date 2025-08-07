@@ -651,3 +651,343 @@ export const getAttendanceRecords = async (req, res) => {
         });
     }
 };
+
+export const distanceTravelled= async(req, res)=>{
+    try {
+    const authHeader = req.headers["authorization"];
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({
+        success: false,
+        message: "Authorization token required",
+      });
+    }
+
+    const token = authHeader.split(" ")[1];
+    let decoded;
+    try {
+      decoded = verify(token, process.env.JWT_SECRET);
+    } catch (error) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired token",
+      });
+    }
+
+    const { date } = req.body; // Expected date in YYYY-MM-DD format
+    const userId = decoded.userId; // From JWT token
+
+    if (!date) {
+      return res.status(400).json({
+        success: false,
+        message: "Date is required",
+      });
+    }
+
+    // Fetch attendance records for the user on the given date
+    const attendances = await prisma.attendance.findMany({
+      where: {
+        userId,
+        date,
+      },
+      orderBy: {
+        timestamp: 'asc', // Order by timestamp to calculate sequential distances
+      },
+    });
+
+    // Log attendance records for debugging
+    console.log('Fetched attendance records:', attendances);
+
+    // Validate attendance records
+    if (!attendances || attendances.length === 0) {
+      return res.status(200).json({
+        success: true,
+        totalDistance: 0,
+        pointToPointDistances: [],
+        message: 'No attendance records found for the given date',
+      });
+    }
+
+    if (attendances.length < 2) {
+      // For single record, return it with zero distance
+      const singleRecordDistance = [{
+        attendanceId: attendances[0].id,
+        from: null,
+        to: {
+          lat: attendances[0].lat,
+          lng: attendances[0].lng,
+          locationName: attendances[0].locationName,
+          timestamp: attendances[0].timestamp,
+        },
+        distance: '0.00',
+        isFirst: true,
+      }];
+      
+      return res.status(200).json({
+        success: true,
+        totalDistance: 0,
+        pointToPointDistances: singleRecordDistance,
+        message: 'Single attendance record - no distance to calculate',
+      });
+    }
+
+    // Validate that all attendance records have lat and lng
+    const invalidRecords = attendances.filter(
+      (att) => att.lat == null || att.lng == null
+    );
+    if (invalidRecords.length > 0) {
+      console.error('Invalid attendance records:', invalidRecords);
+      return res.status(400).json({
+        success: false,
+        message: 'Some attendance records are missing latitude or longitude',
+      });
+    }
+
+    // Function to calculate straight-line distance between two points (Haversine formula)
+    const calculateStraightLineDistance = (lat1, lng1, lat2, lng2) => {
+      const R = 6371; // Earth's radius in kilometers
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLng = (lng2 - lng1) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLng/2) * Math.sin(dLng/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c * 1000; // Distance in meters
+    };
+
+    // Pre-check distances and prepare API calls only for meaningful distances
+    const distancePairs = [];
+    const googleApiIndices = [];
+    const originsForAPI = [];
+    const destinationsForAPI = [];
+
+    for (let i = 0; i < attendances.length - 1; i++) {
+      const fromLat = attendances[i].lat;
+      const fromLng = attendances[i].lng;
+      const toLat = attendances[i + 1].lat;
+      const toLng = attendances[i + 1].lng;
+      
+      // Calculate straight-line distance first
+      const straightLineDistance = calculateStraightLineDistance(fromLat, fromLng, toLat, toLng);
+      console.log(`Pre-check distance ${i}: ${straightLineDistance.toFixed(2)} meters`);
+      
+      distancePairs.push({
+        index: i,
+        straightLineDistance,
+        needsGoogleAPI: straightLineDistance >= 100
+      });
+
+      if (straightLineDistance >= 100) {
+        googleApiIndices.push(i);
+        originsForAPI.push(`${fromLat},${fromLng}`);
+        destinationsForAPI.push(`${toLat},${toLng}`);
+      }
+    }
+
+    let data = { rows: [] };
+    
+    // Only call Google API if we have pairs that need it
+    if (originsForAPI.length > 0) {
+      const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+      const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${originsForAPI.join('|')}&destinations=${destinationsForAPI.join('|')}&key=${apiKey}&units=metric`;
+
+      const response = await axios.get(url);
+      data = response.data;
+
+      if (data.status !== 'OK') {
+        console.error('Google API error:', data);
+        throw new Error('Failed to fetch distance data from Google API');
+      }
+
+      // Log full API response for debugging
+      console.log('Google Distance Matrix response:', JSON.stringify(data, null, 2));
+    } else {
+      console.log('No Google API call needed - all distances are below 100m threshold');
+    }
+
+    // Calculate total distance and collect point-to-point distances
+    let totalDistance = 0; // In meters
+    const pointToPointDistances = [];
+
+    // Add first record with zero distance (no previous location)
+    pointToPointDistances.push({
+      attendanceId: attendances[0].id,
+      from: null, // No previous location
+      to: {
+        lat: attendances[0].lat,
+        lng: attendances[0].lng,
+        locationName: attendances[0].locationName,
+        timestamp: attendances[0].timestamp,
+      },
+      distance: '0.00', // First record always has zero distance
+      isFirst: true,
+    });
+
+    // Process distances using pre-checked data
+    let googleApiIndex = 0; // Index for Google API results
+    
+    for (let i = 0; i < distancePairs.length; i++) {
+      const pair = distancePairs[i];
+      const fromLat = attendances[pair.index].lat;
+      const fromLng = attendances[pair.index].lng;
+      const toLat = attendances[pair.index + 1].lat;
+      const toLng = attendances[pair.index + 1].lng;
+      
+      console.log(`Processing pair ${pair.index}: straight-line ${pair.straightLineDistance.toFixed(2)}m, needsGoogleAPI: ${pair.needsGoogleAPI}`);
+      
+      if (!pair.needsGoogleAPI) {
+        // Treat as same location (< 100m straight-line distance)
+        console.log(`Locations are very close (${pair.straightLineDistance.toFixed(2)}m), treating as same location`);
+        pointToPointDistances.push({
+          attendanceId: attendances[pair.index + 1].id,
+          from: {
+            lat: fromLat,
+            lng: fromLng,
+            locationName: attendances[pair.index].locationName,
+            timestamp: attendances[pair.index].timestamp,
+          },
+          to: {
+            lat: toLat,
+            lng: toLng,
+            locationName: attendances[pair.index + 1].locationName,
+            timestamp: attendances[pair.index + 1].timestamp,
+          },
+          distance: '0.00', // Treat as same location
+          isFirst: false,
+        });
+      } else {
+        // Use Google API result
+        const element = data.rows[googleApiIndex]?.elements[0]; // Each row has one element for our setup
+        console.log(`Processing Google API result ${googleApiIndex}: element=`, element);
+        
+        if (element && element.status === 'OK' && element.distance && element.distance.value != null) {
+          const distanceInMeters = element.distance.value; // Distance in meters from Google API
+          const distanceInKm = distanceInMeters / 1000; // Convert to kilometers
+          
+          console.log(`Google API distance ${pair.index}: ${distanceInMeters} meters (${distanceInKm.toFixed(2)} km)`);
+          console.log(`Straight-line vs Google: ${pair.straightLineDistance.toFixed(2)}m vs ${distanceInMeters}m`);
+          
+          // Only add to total distance if it's a meaningful movement (> 100 meters)
+          // Also check if Google distance is reasonable compared to straight-line distance
+          if (distanceInMeters > 100 && distanceInMeters < (pair.straightLineDistance * 10)) { 
+            totalDistance += distanceInMeters; // Add to total in meters
+            console.log(`Added ${distanceInMeters} meters to total. New total: ${totalDistance} meters`);
+          } else {
+            console.log(`Skipped adding ${distanceInMeters} meters (below 100m threshold or unreasonable route)`);
+          }
+          
+          pointToPointDistances.push({
+            attendanceId: attendances[pair.index + 1].id,
+            from: {
+              lat: fromLat,
+              lng: fromLng,
+              locationName: attendances[pair.index].locationName,
+              timestamp: attendances[pair.index].timestamp,
+            },
+            to: {
+              lat: toLat,
+              lng: toLng,
+              locationName: attendances[pair.index + 1].locationName,
+              timestamp: attendances[pair.index + 1].timestamp,
+            },
+            distance: distanceInKm.toFixed(2), // Distance in kilometers, rounded to 2 decimals
+            isFirst: false,
+          });
+        } else {
+          console.warn('Invalid distance element at Google API index', googleApiIndex, element);
+          pointToPointDistances.push({
+            attendanceId: attendances[pair.index + 1].id,
+            from: {
+              lat: fromLat,
+              lng: fromLng,
+              locationName: attendances[pair.index].locationName,
+              timestamp: attendances[pair.index].timestamp,
+            },
+            to: {
+              lat: toLat,
+              lng: toLng,
+              locationName: attendances[pair.index + 1].locationName,
+              timestamp: attendances[pair.index + 1].timestamp,
+            },
+            distance: 'N/A', // Indicate unavailable distance
+            isFirst: false,
+          });
+        }
+        
+        googleApiIndex++; // Move to next Google API result
+      }
+    }
+
+    // Convert total distance to kilometers
+    totalDistance = totalDistance / 1000;
+    
+    console.log(`Final total distance: ${totalDistance.toFixed(2)} km`);
+    console.log(`Point-to-point distances:`, pointToPointDistances.map(p => ({
+      attendanceId: p.attendanceId,
+      distance: p.distance,
+      isFirst: p.isFirst
+    })));
+
+    // Store or update the distance in DailyDistance
+    await prisma.dailyDistance.upsert({
+      where: {
+        userId_date: { userId, date },
+      },
+      update: {
+        totalDistance,
+        updatedAt: new Date(),
+      },
+      create: {
+        userId,
+        date,
+        totalDistance,
+      },
+    });
+
+    res.json({
+      success: true,
+      totalDistance,
+      pointToPointDistances,
+      message: 'Distance calculated and stored successfully',
+    });
+  } catch (error) {
+    console.error('Error calculating distance:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+}
+
+export const mapRecord= async(req, res)=>{
+    const { date } = req.params; // Date in YYYY-MM-DD format
+  const userId = req.user.userId; // Get userId from decoded token
+
+  try {
+    // Validate date format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+
+    const attendances = await prisma.attendance.findMany({
+      where: {
+        userId,
+        date, // Match the date field in the Attendance model
+      },
+      select: {
+        id: true,
+        lat: true,
+        lng: true,
+        locationName: true,
+        purpose: true,
+        subPurpose: true,
+        feedback: true,
+        timestamp: true,
+      },
+    });
+
+    res.json(attendances);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
