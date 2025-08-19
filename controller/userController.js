@@ -2,7 +2,7 @@ import bcrypt from "bcrypt";
 import { z } from "zod";
 import jwt from "jsonwebtoken";
 import prisma from "../db/db.config.js";
-import { sendVerificationEmail, sendCongratulationsEmail } from "../utils/emailService.js";
+import { sendVerificationEmail, sendCongratulationsEmail, sendResetPasswordEmail } from "../utils/emailService.js";
 import cloudinary from "cloudinary";
 import axios from "axios";
 import sharp from 'sharp';
@@ -991,3 +991,142 @@ export const mapRecord= async(req, res)=>{
     res.status(500).json({ error: 'Internal server error' });
   }
 }
+
+// Forgot Password Function
+export const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+    }
+
+    // Find user by email
+    const user = await prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found with this email address",
+      });
+    }
+
+    // Generate reset token (expires in 1 hour)
+    const resetToken = sign(
+      { userId: user.id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    // Send reset password email
+    await sendResetPasswordEmail(user.email, user.fullName || "User", resetToken);
+
+    return res.status(200).json({
+      success: true,
+      message: "Password reset link has been sent to your email address",
+    });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
+// Reset Password Function
+export const resetPassword = async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Token and new password are required",
+      });
+    }
+
+    // Validate password strength
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters long",
+      });
+    }
+
+    // Verify token
+    let decoded;
+    try {
+      decoded = verify(token, process.env.JWT_SECRET);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired reset token",
+      });
+    }
+
+    // Find user
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update password
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { password: hashedPassword },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Password has been reset successfully",
+    });
+  } catch (error) {
+    console.error("Reset password error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
+// List unique admin company names for organization dropdown
+export const listAdminCompanies = async (req, res) => {
+  try {
+    const admins = await prisma.user.findMany({
+      where: {
+        role: 'ADMIN',
+        NOT: [
+          { companyName: null },
+          { companyName: '' },
+        ],
+      },
+      select: { companyName: true },
+      distinct: ['companyName'],
+      orderBy: { companyName: 'asc' },
+    });
+
+    const companies = admins
+      .map(a => a.companyName)
+      .filter(Boolean);
+
+    return res.status(200).json({ success: true, companies });
+  } catch (error) {
+    console.error('Error fetching admin companies:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
