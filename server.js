@@ -14,7 +14,8 @@ const allowedOrigins = [
     // 'https://frontend-09jj.onrender.com', // Production frontend URL
     'http://localhost:3000', // Local development frontend URL
     'exp://192.168.1.34:8081',
-    'http://192.168.1.34:4000'
+    'http://192.168.1.34:4000',
+    'https://worktrack-web2.onrender.com'
   ];
   
   app.use(cors({
