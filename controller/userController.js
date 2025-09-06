@@ -332,8 +332,9 @@ const compressImageToTargetSize = async (buffer, maxSizeInKB = 10) => {
 // Fetch location name from latitude and longitude
 export const getLocationName = async (lat, lng) => {
   try {
+      // Include POIs and establishments for more precise names
       const response = await fetch(
-          `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&result_type=street_address|premise|neighborhood|sublocality&language=en&key=${GMAP_API_KEY}`
+          `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&result_type=point_of_interest|establishment|premise|street_address|route|neighborhood|sublocality&language=en&key=${GMAP_API_KEY}`
       );
       const data = await response.json();
 
@@ -345,89 +346,40 @@ export const getLocationName = async (lat, lng) => {
           throw new Error('No location name found for the provided coordinates');
       }
 
-      // Find the most specific result
-      const preferredTypes = ['street_address', 'premise', 'point_of_interest', 'neighborhood', 'sublocality'];
+      // Prefer POIs and premises first, then street addresses
+      const preferredOrder = ['point_of_interest', 'premise', 'establishment', 'street_address', 'route', 'neighborhood', 'sublocality'];
       let selectedResult = data.results[0];
-      let maxComponents = selectedResult.address_components.length;
+      let bestScore = -1;
 
       for (const result of data.results) {
-          if (
-              preferredTypes.some(type => result.types.includes(type)) &&
-              result.address_components.length >= maxComponents
-          ) {
+          let score = 0;
+          for (let i = 0; i < preferredOrder.length; i++) {
+              if (result.types.includes(preferredOrder[i])) {
+                  // Higher weight for earlier types
+                  score += (preferredOrder.length - i) * 10;
+              }
+          }
+          // Prefer more specific results and good geometry types
+          score += (result.address_components?.length || 0);
+          const locType = result.geometry?.location_type;
+          if (locType === 'ROOFTOP') score += 8;
+          else if (locType === 'GEOMETRIC_CENTER') score += 4;
+
+          if (score > bestScore) {
+              bestScore = score;
               selectedResult = result;
-              maxComponents = result.address_components.length;
           }
       }
 
-      // Extract all relevant address components
-      const addressComponents = {
-          streetNumber: '',
-          route: '',
-          sublocality: '',
-          locality: '',
-          administrativeArea2: '',
-          administrativeArea1: '',
-          postalCode: '',
-          country: '',
-          premise: '',
-          neighborhood: ''
-      };
+      // Use Google's formatted address for better consistency
+      const formattedAddress = selectedResult.formatted_address || '';
 
-      for (const component of selectedResult.address_components) {
-          if (component.types.includes('street_number')) {
-              addressComponents.streetNumber = component.long_name;
-          } else if (component.types.includes('route')) {
-              addressComponents.route = component.long_name;
-          } else if (component.types.includes('sublocality')) {
-              addressComponents.sublocality = component.long_name;
-          } else if (component.types.includes('locality')) {
-              addressComponents.locality = component.long_name;
-          } else if (component.types.includes('administrative_area_level_2')) {
-              addressComponents.administrativeArea2 = component.long_name;
-          } else if (component.types.includes('administrative_area_level_1')) {
-              addressComponents.administrativeArea1 = component.long_name;
-          } else if (component.types.includes('postal_code')) {
-              addressComponents.postalCode = component.long_name;
-          } else if (component.types.includes('country')) {
-              addressComponents.country = component.long_name;
-          } else if (component.types.includes('premise')) {
-              addressComponents.premise = component.long_name;
-          } else if (component.types.includes('neighborhood')) {
-              addressComponents.neighborhood = component.long_name;
-          }
-      }
-
-      // Build detailed address object
-      const detailedAddress = {
-          street: `${addressComponents.streetNumber} ${addressComponents.route}`.trim(),
-          sublocality: addressComponents.sublocality || addressComponents.neighborhood,
-          city: addressComponents.locality || addressComponents.administrativeArea2,
-          state: addressComponents.administrativeArea1,
-          postalCode: addressComponents.postalCode,
-          country: addressComponents.country,
-          premise: addressComponents.premise,
-          coordinates: { lat, lng }
-      };
-
-      // Generate a formatted string for display
-      const addressParts = [];
-      if (detailedAddress.street) addressParts.push(detailedAddress.street);
-      if (detailedAddress.premise) addressParts.push(detailedAddress.premise);
-      if (detailedAddress.sublocality) addressParts.push(detailedAddress.sublocality);
-      if (detailedAddress.city) addressParts.push(detailedAddress.city);
-      if (detailedAddress.state) addressParts.push(detailedAddress.state);
-      if (detailedAddress.postalCode) addressParts.push(detailedAddress.postalCode);
-      if (detailedAddress.country) addressParts.push(detailedAddress.country);
-
-      const formattedAddress = addressParts.join(', ');
-
-      // Determine if the address is vague
-      const isVague = !detailedAddress.street && !detailedAddress.sublocality;
+      // Determine if the address is vague (fallback check)
+      const isVague = !formattedAddress || formattedAddress.split(',').length < 2;
 
       return {
-          formattedAddress: formattedAddress || selectedResult.formatted_address,
-          detailedAddress,
+          formattedAddress,
+          detailedAddress: { formattedAddress, coordinates: { lat, lng } },
           isVague,
           coordinates: { lat, lng }
       };
